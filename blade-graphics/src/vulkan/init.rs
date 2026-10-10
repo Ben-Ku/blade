@@ -47,7 +47,6 @@ mod layer {
 const REQUIRED_DEVICE_EXTENSIONS: &[&ffi::CStr] = &[
     vk::KHR_TIMELINE_SEMAPHORE_NAME,
     vk::KHR_DESCRIPTOR_UPDATE_TEMPLATE_NAME,
-    vk::KHR_DYNAMIC_RENDERING_NAME,
     #[cfg(feature = "aftermath")]
     vk::NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_NAME,
     #[cfg(feature = "aftermath")]
@@ -70,6 +69,11 @@ struct SystemBugs {
 #[derive(Debug)]
 struct AdapterCapabilities {
     api_version: u32,
+    dynamic_rendering: bool,
+    depth_resolve_modes: vk::ResolveModeFlags,
+    stencil_resolve_modes: vk::ResolveModeFlags,
+    independent_resolve: bool,
+    independent_resolve_none: bool,
     properties: vk::PhysicalDeviceProperties,
     device_information: crate::DeviceInformation,
     queue_family_index: u32,
@@ -131,6 +135,7 @@ unsafe fn inspect_adapter(
         vk::PhysicalDeviceFragmentShadingRatePropertiesKHR::default();
 
     let mut driver_properties = vk::PhysicalDeviceDriverPropertiesKHR::default();
+    let mut resolve_properties = vk::PhysicalDeviceDepthStencilResolveProperties::default();
     let mut properties2_khr = vk::PhysicalDeviceProperties2KHR::default()
         .push_next(&mut inline_uniform_block_properties)
         .push_next(&mut timeline_semaphore_properties)
@@ -138,7 +143,8 @@ unsafe fn inspect_adapter(
         .push_next(&mut acceleration_structure_properties)
         .push_next(&mut portability_subset_properties)
         .push_next(&mut fragment_shading_rate_properties)
-        .push_next(&mut driver_properties);
+        .push_next(&mut driver_properties)
+        .push_next(&mut resolve_properties);
     instance
         .get_physical_device_properties2
         .get_physical_device_properties2(phd, &mut properties2_khr);
@@ -200,6 +206,7 @@ unsafe fn inspect_adapter(
         vk::PhysicalDeviceInlineUniformBlockFeaturesEXT::default();
     let mut timeline_semaphore_features = vk::PhysicalDeviceTimelineSemaphoreFeaturesKHR::default();
     let mut dynamic_rendering_features = vk::PhysicalDeviceDynamicRenderingFeaturesKHR::default();
+    let mut imageless_features = vk::PhysicalDeviceImagelessFramebufferFeatures::default();
     let mut descriptor_indexing_features =
         vk::PhysicalDeviceDescriptorIndexingFeaturesEXT::default();
     let mut buffer_device_address_features =
@@ -221,6 +228,7 @@ unsafe fn inspect_adapter(
         .push_next(&mut inline_uniform_block_features)
         .push_next(&mut timeline_semaphore_features)
         .push_next(&mut dynamic_rendering_features)
+        .push_next(&mut imageless_features)
         .push_next(&mut descriptor_indexing_features)
         .push_next(&mut buffer_device_address_features)
         .push_next(&mut shader_float16_int8_features)
@@ -278,11 +286,13 @@ unsafe fn inspect_adapter(
         return None;
     }
 
-    if dynamic_rendering_features.dynamic_rendering == 0 {
-        log::warn!(
-            "\tRejected for dynamic rendering. Features = {:?}",
-            dynamic_rendering_features,
-        );
+    let dynamic_rendering = supported_extensions.contains(&vk::KHR_DYNAMIC_RENDERING_NAME)
+        && dynamic_rendering_features.dynamic_rendering != 0
+        && std::env::var_os("BLADE_VULKAN_FORCE_LEGACY_RENDER_PASS").is_none();
+    if !dynamic_rendering
+        && (api_version < vk::API_VERSION_1_2 || imageless_features.imageless_framebuffer == 0)
+    {
+        log::warn!("Rejected: legacy rendering requires Vulkan 1.2 and imageless framebuffers");
         return None;
     }
 
@@ -371,15 +381,16 @@ unsafe fn inspect_adapter(
         log::info!("VK_EXT_swapchain_maintenance1 is supported");
     }
 
-    let multisampled_render_to_single_sampled = supported_extensions
-        .contains(&vk::EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_NAME)
+    let multisampled_render_to_single_sampled = dynamic_rendering
+        && supported_extensions.contains(&vk::EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_NAME)
         && multisampled_render_to_single_sampled_features.multisampled_render_to_single_sampled
             == vk::TRUE;
     if multisampled_render_to_single_sampled {
         log::info!("VK_EXT_multisampled_render_to_single_sampled is supported");
     }
 
-    let fragment_shading_rate = supported_extensions.contains(&vk::KHR_FRAGMENT_SHADING_RATE_NAME)
+    let fragment_shading_rate = dynamic_rendering
+        && supported_extensions.contains(&vk::KHR_FRAGMENT_SHADING_RATE_NAME)
         && fragment_shading_rate_features.pipeline_fragment_shading_rate == vk::TRUE;
     let fragment_shading_rates = if fragment_shading_rate {
         let get_rates = instance
@@ -453,6 +464,11 @@ unsafe fn inspect_adapter(
 
     Some(AdapterCapabilities {
         api_version,
+        dynamic_rendering,
+        depth_resolve_modes: resolve_properties.supported_depth_resolve_modes,
+        stencil_resolve_modes: resolve_properties.supported_stencil_resolve_modes,
+        independent_resolve: resolve_properties.independent_resolve != 0,
+        independent_resolve_none: resolve_properties.independent_resolve_none != 0,
         properties,
         device_information,
         queue_family_index,
@@ -679,6 +695,14 @@ impl super::Context {
         );
 
         log::debug!("Adapter {:#?}", capabilities);
+        log::info!(
+            "Vulkan rendering: {}",
+            if capabilities.dynamic_rendering {
+                "dynamic rendering"
+            } else {
+                "legacy render passes with imageless framebuffers"
+            }
+        );
         let mut min_buffer_alignment = 1;
         if let Some(ref rt) = capabilities.ray_tracing {
             min_buffer_alignment = min_buffer_alignment.max(rt.min_scratch_buffer_alignment);
@@ -693,6 +717,9 @@ impl super::Context {
             let family_infos = [family_info];
 
             let mut device_extensions = REQUIRED_DEVICE_EXTENSIONS.to_vec();
+            if capabilities.dynamic_rendering {
+                device_extensions.push(vk::KHR_DYNAMIC_RENDERING_NAME);
+            }
             if capabilities.inline_uniform_blocks {
                 device_extensions.push(vk::EXT_INLINE_UNIFORM_BLOCK_NAME);
             }
@@ -774,6 +801,9 @@ impl super::Context {
                 dynamic_rendering: vk::TRUE,
                 ..Default::default()
             };
+            let mut imageless_features =
+                vk::PhysicalDeviceImagelessFramebufferFeatures::default()
+                    .imageless_framebuffer(true);
             let mut shader_float16_int8 = vk::PhysicalDeviceShaderFloat16Int8Features {
                 shader_float16: vk::TRUE,
                 ..Default::default()
@@ -832,8 +862,12 @@ impl super::Context {
                 .enabled_features(&features)
                 .queue_create_infos(&family_infos)
                 .enabled_extension_names(&str_pointers)
-                .push_next(&mut khr_timeline_semaphore)
-                .push_next(&mut khr_dynamic_rendering);
+                .push_next(&mut khr_timeline_semaphore);
+            if capabilities.dynamic_rendering {
+                device_create_info = device_create_info.push_next(&mut khr_dynamic_rendering);
+            } else {
+                device_create_info = device_create_info.push_next(&mut imageless_features);
+            }
             if capabilities.inline_uniform_blocks {
                 device_create_info = device_create_info.push_next(&mut ext_inline_uniform_block);
             }
@@ -924,7 +958,14 @@ impl super::Context {
             },
             debug_utils: ext::debug_utils::Device::new(&instance.core, &device_core),
             timeline_semaphore: khr::timeline_semaphore::Device::new(&instance.core, &device_core),
-            dynamic_rendering: khr::dynamic_rendering::Device::new(&instance.core, &device_core),
+            dynamic_rendering: capabilities.dynamic_rendering.then(|| {
+                khr::dynamic_rendering::Device::new(&instance.core, &device_core)
+            }),
+            legacy_rendering: Default::default(),
+            depth_resolve_modes: capabilities.depth_resolve_modes,
+            stencil_resolve_modes: capabilities.stencil_resolve_modes,
+            independent_resolve: capabilities.independent_resolve,
+            independent_resolve_none: capabilities.independent_resolve_none,
             ray_tracing: if let Some(ref caps) = capabilities.ray_tracing {
                 Some(super::RayTracingDevice {
                     acceleration_structure: khr::acceleration_structure::Device::new(
@@ -1244,6 +1285,11 @@ impl Drop for super::Context {
                     .core
                     .destroy_semaphore(queue.timeline_semaphore, None);
             }
+            self.device
+                .legacy_rendering
+                .lock()
+                .unwrap()
+                .destroy(&self.device.core);
             self.device.core.destroy_device(None);
             self.instance.core.destroy_instance(None);
         }

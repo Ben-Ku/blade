@@ -262,6 +262,7 @@ impl super::Context {
                 format: crate::TextureFormat::Rgba8Unorm,
                 alpha: crate::AlphaMode::Ignored,
                 target_size: [0; 2],
+                usage: vk::ImageUsageFlags::empty(),
             },
             full_screen_exclusive: fullscreen_exclusive_ext.full_screen_exclusive_supported != 0,
             next_present_id: 1,
@@ -652,6 +653,7 @@ impl super::Context {
             format,
             alpha,
             target_size,
+            usage: vk_usage,
         };
     }
 }

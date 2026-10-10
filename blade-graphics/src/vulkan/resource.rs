@@ -471,6 +471,14 @@ impl crate::traits::ResourceDevice for super::Context {
             target_size: [desc.size.width as u16, desc.size.height as u16],
             format: desc.format,
             external: fetch_external_source(&self.device, allocation),
+            attachment: super::legacy::AttachmentImage {
+                flags: create_flags,
+                usage: vk_info.usage,
+                samples: vk_info.samples,
+                size: [desc.size.width, desc.size.height],
+                layers: desc.array_layer_count,
+                format: vk_info.format,
+            },
         }
     }
 
@@ -512,6 +520,18 @@ impl crate::traits::ResourceDevice for super::Context {
             ],
             format: desc.format,
             aspects,
+            attachment: super::legacy::AttachmentImage {
+                size: [
+                    (texture.attachment.size[0] >> desc.subresources.base_mip_level).max(1),
+                    (texture.attachment.size[1] >> desc.subresources.base_mip_level).max(1),
+                ],
+                layers: desc.subresources.array_layer_count.map_or(
+                    texture.attachment.layers - desc.subresources.base_array_layer,
+                    |count| count.get(),
+                ),
+                format: super::map_texture_format(desc.format),
+                ..texture.attachment
+            },
         }
     }
 

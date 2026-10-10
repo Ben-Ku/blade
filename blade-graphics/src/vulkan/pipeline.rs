@@ -711,7 +711,7 @@ impl crate::traits::ShaderDevice for super::Context {
         } else {
             vk::PipelineCreateFlags::empty()
         };
-        let create_info = vk::GraphicsPipelineCreateInfo::default()
+        let mut create_info = vk::GraphicsPipelineCreateInfo::default()
             .flags(pipeline_flags)
             .layout(layout.raw)
             .stages(&stages)
@@ -722,8 +722,20 @@ impl crate::traits::ShaderDevice for super::Context {
             .multisample_state(&vk_multisample)
             .depth_stencil_state(&vk_depth_stencil)
             .color_blend_state(&vk_color_blend)
-            .dynamic_state(&vk_dynamic_state)
-            .push_next(&mut rendering_info);
+            .dynamic_state(&vk_dynamic_state);
+        if self.device.dynamic_rendering.is_some() {
+            create_info = create_info.push_next(&mut rendering_info);
+        } else {
+            let render_pass = self.device.legacy_rendering.lock().unwrap().pipeline_pass(
+                &self.device.core,
+                &color_formats,
+                desc.depth_stencil
+                    .as_ref()
+                    .map(|ds| super::map_texture_format(ds.format)),
+                vk::SampleCountFlags::from_raw(desc.multisample_state.sample_count),
+            );
+            create_info = create_info.render_pass(render_pass).subpass(0);
+        }
 
         let mut raw_vec = unsafe {
             self.device

@@ -2,11 +2,18 @@ use ash::{
     khr,
     vk::{self},
 };
-use std::{mem, num::NonZeroU32, path::PathBuf, ptr, sync::Mutex};
+use std::{
+    mem,
+    num::NonZeroU32,
+    path::PathBuf,
+    ptr,
+    sync::{Arc, Mutex},
+};
 
 mod command;
 mod descriptor;
 mod init;
+mod legacy;
 mod pipeline;
 mod resource;
 mod surface;
@@ -58,7 +65,12 @@ struct Device {
     swapchain: Option<khr::swapchain::Device>,
     debug_utils: ash::ext::debug_utils::Device,
     timeline_semaphore: khr::timeline_semaphore::Device,
-    dynamic_rendering: khr::dynamic_rendering::Device,
+    dynamic_rendering: Option<khr::dynamic_rendering::Device>,
+    legacy_rendering: Arc<Mutex<legacy::Cache>>,
+    depth_resolve_modes: vk::ResolveModeFlags,
+    stencil_resolve_modes: vk::ResolveModeFlags,
+    independent_resolve: bool,
+    independent_resolve_none: bool,
     ray_tracing: Option<RayTracingDevice>,
     buffer_device_address: bool,
     shader_float16: bool,
@@ -135,6 +147,7 @@ struct Swapchain {
     format: crate::TextureFormat,
     alpha: crate::AlphaMode,
     target_size: [u16; 2],
+    usage: vk::ImageUsageFlags,
 }
 
 pub struct Surface {
@@ -179,6 +192,11 @@ impl Frame {
             target_size: self.swapchain.target_size,
             format: self.swapchain.format,
             external: None,
+            attachment: legacy::AttachmentImage::swapchain(
+                self.swapchain.target_size,
+                self.swapchain.format,
+                self.swapchain.usage,
+            ),
         }
     }
 
@@ -188,6 +206,11 @@ impl Frame {
             target_size: self.swapchain.target_size,
             format: self.swapchain.format,
             aspects: self.swapchain.format.aspects(),
+            attachment: legacy::AttachmentImage::swapchain(
+                self.swapchain.target_size,
+                self.swapchain.format,
+                self.swapchain.usage,
+            ),
         }
     }
 
@@ -265,6 +288,7 @@ pub struct Texture {
     target_size: [u16; 2],
     format: crate::TextureFormat,
     external: Option<crate::ExternalMemorySource>,
+    attachment: legacy::AttachmentImage,
 }
 
 impl Default for Texture {
@@ -275,6 +299,7 @@ impl Default for Texture {
             target_size: [0; 2],
             format: crate::TextureFormat::Rgba8Unorm,
             external: None,
+            attachment: legacy::AttachmentImage::default(),
         }
     }
 }
@@ -285,6 +310,7 @@ pub struct TextureView {
     target_size: [u16; 2],
     format: crate::TextureFormat,
     aspects: crate::TexelAspects,
+    attachment: legacy::AttachmentImage,
 }
 
 impl Default for TextureView {
@@ -294,6 +320,7 @@ impl Default for TextureView {
             target_size: [0; 2],
             format: crate::TextureFormat::Rgba8Unorm,
             aspects: crate::TextureFormat::Rgba8Unorm.aspects(),
+            attachment: legacy::AttachmentImage::default(),
         }
     }
 }

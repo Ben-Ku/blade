@@ -199,7 +199,7 @@ fn make_buffer_image_copy(
     }
 }
 
-trait AsVkClear {
+pub(super) trait AsVkClear {
     fn as_vk_clear(self, format: crate::TextureFormat) -> vk::ClearValue;
 }
 impl AsVkClear for crate::TextureColor {
@@ -275,7 +275,7 @@ impl AsVkClear for f32 {
     }
 }
 
-fn map_render_target<V: AsVkClear>(
+pub(super) fn map_render_target<V: AsVkClear>(
     view: crate::TextureView,
     init_op: crate::InitOp<V>,
     finish_op: crate::FinishOp,
@@ -628,9 +628,17 @@ impl super::CommandEncoder {
             self.device
                 .core
                 .cmd_set_scissor(cmd_buf.raw, 0, &[render_area]);
-            self.device
-                .dynamic_rendering
-                .cmd_begin_rendering(cmd_buf.raw, &rendering_info);
+            if let Some(extension) = &self.device.dynamic_rendering {
+                extension.cmd_begin_rendering(cmd_buf.raw, &rendering_info);
+            } else {
+                assert!(sample_count.is_none() && fragment_shading_rate_attachment.is_none());
+                self.device.legacy_rendering.lock().unwrap().begin(
+                    &self.device,
+                    cmd_buf.raw,
+                    &targets,
+                    render_area,
+                );
+            }
             if let Some(extension) = &self.device.fragment_shading_rate {
                 let fragment_size = vk::Extent2D {
                     width: 1,
@@ -1341,9 +1349,11 @@ impl Drop for super::RenderCommandEncoder<'_> {
     fn drop(&mut self) {
         profiling::function_scope!();
         unsafe {
-            self.device
-                .dynamic_rendering
-                .cmd_end_rendering(self.cmd_buf.raw)
+            if let Some(extension) = &self.device.dynamic_rendering {
+                extension.cmd_end_rendering(self.cmd_buf.raw);
+            } else {
+                self.device.core.cmd_end_render_pass(self.cmd_buf.raw);
+            }
         };
         end_pass(self.device, self.cmd_buf.raw);
     }
